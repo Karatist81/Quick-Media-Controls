@@ -29,8 +29,8 @@ namespace Quick_Media_Controls
         private const double FlyoutScreenMargin = 11;
         private const double MinFlyoutWidth = 350;
         private const double MaxFlyoutWidth = 360;
-        private const double MinFlyoutHeight = 96;
-        private const double MaxFlyoutHeight = 112;
+	private const double MinFlyoutHeight = 96;
+	private const double MaxFlyoutHeight = 140;
 
         private FlyoutPalette? _currentPalette;
         private BitmapImage? _currentThumbnail;

@@ -1,262 +1,111 @@
-<ui:FluentWindow
-    x:Class="Quick_Media_Controls.MediaFlyout"
-    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-    xmlns:ui="http://schemas.lepo.co/wpfui/2022/xaml"
-    Title="MediaFlyout"
-    Width="360"
-    Height="112"
-    MinWidth="350"
-    MinHeight="96"
-    MaxWidth="360"
-    MaxHeight="112"
-    AllowDrop="False"
-    Deactivated="Flyout_Deactivated"
-    ExtendsContentIntoTitleBar="True"
-    ResizeMode="NoResize"
-    ShowActivated="True"
-    ShowInTaskbar="False"
-    Topmost="False"
-    Background="Transparent"
-    WindowBackdropType="Mica"
-    WindowStartupLocation="Manual"
-    mc:Ignorable="d">
+using System;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Threading;
+using Windows.Media;
 
-    <Window.Resources>
-        <Style x:Key="PlayPauseFlyoutButtonStyle" TargetType="{x:Type ui:Button}">
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="Padding" Value="11,5,11,6" />
-            <Setter Property="HorizontalContentAlignment" Value="Center" />
-            <Setter Property="VerticalContentAlignment" Value="Center" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="{x:Type ui:Button}">
-                        <Border
-                            x:Name="ButtonBorder"
-                            Background="{TemplateBinding Background}"
-                            BorderBrush="{TemplateBinding BorderBrush}"
-                            BorderThickness="{TemplateBinding BorderThickness}"
-                            CornerRadius="4"
-                            Padding="{TemplateBinding Padding}"
-                            SnapsToDevicePixels="True">
-                            <ContentPresenter
-                                HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                                RecognizesAccessKey="True" />
-                        </Border>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-    </Window.Resources>
+namespace Quick_Media_Controls
+{
+    /// <summary>
+    /// Timeline / repeat / shuffle logic for the flyout, kept in a separate partial
+    /// so MediaFlyout.xaml.cs stays untouched. The position timer runs only while
+    /// the flyout is loaded AND media is playing (idle footprint ~0).
+    /// </summary>
+    public partial class MediaFlyout
+    {
+        private DispatcherTimer? _timelineTimer;
+        private DispatcherTimer? _clickSeekTimer;
+        private bool _isSeeking;
+        private bool _suppressValueEvent;
 
-    <Window.ContextMenu>
-        <ContextMenu>
-            <MenuItem
-                Name="MoveFlyoutToggle"
-                Click="MoveFlyoutMenuItem_Click"
-                Header="Move Flyout"
-                IsCheckable="True" />
-            <MenuItem Click="ResetPositionMenuItem_Click" Header="Reset Position">
-                <MenuItem.Icon>
-                    <ui:SymbolIcon FontSize="18" Symbol="ArrowReset24" />
-                </MenuItem.Icon>
-            </MenuItem>
+        private void TimelineRoot_Loaded(object sender, RoutedEventArgs e)
+        {
+            _timelineTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _timelineTimer.Tick += (_, _) => RefreshTimelineUi();
+            _sessionManager.TimelineChanged += OnTimelineChanged;
+            _sessionManager.PlaybackInfoChanged += OnPlaybackInfoChangedForTimeline;
+            SyncTimerWithPlayback();
+            RefreshTimelineUi();
+        }
 
-            <MenuItem Click="GithubMenuItem_Click" Header="On Github">
-                <MenuItem.Icon>
-                    <ui:SymbolIcon
-                        Filled="True"
-                        FontSize="18"
-                        Foreground="Gold"
-                        Symbol="Star20" />
-                </MenuItem.Icon>
-            </MenuItem>
-            <MenuItem Click="SettingsMenuItem_Click" Header="Settings">
-                <MenuItem.Icon>
-                    <ui:SymbolIcon FontSize="18" Symbol="Settings20" />
-                </MenuItem.Icon>
-            </MenuItem>
-            <MenuItem Click="Exit_Click" Header="Exit Application">
-                <MenuItem.Icon>
-                    <ui:SymbolIcon FontSize="18" Symbol="ArrowExit20" />
-                </MenuItem.Icon>
-            </MenuItem>
+        private void TimelineRoot_Unloaded(object sender, RoutedEventArgs e)
+        {
+            _timelineTimer?.Stop();
+            _clickSeekTimer?.Stop();
+            _sessionManager.TimelineChanged -= OnTimelineChanged;
+            _sessionManager.PlaybackInfoChanged -= OnPlaybackInfoChangedForTimeline;
+        }
 
-        </ContextMenu>
-    </Window.ContextMenu>
-    <Grid x:Name="Root" Opacity="1">
-        <Grid x:Name="DynamicAmbientLayer" Visibility="Collapsed" IsHitTestVisible="False">
-            <Border x:Name="DynamicAmbientBackground" />
-            <Border x:Name="DynamicAmbientOverlay" />
-        </Grid>
+        private void OnTimelineChanged(object? sender, EventArgs e) =>
+            Dispatcher.InvokeAsync(RefreshTimelineUi);
 
-        <Grid x:Name="BlurredArtworkLayer" Visibility="Collapsed" IsHitTestVisible="False" ClipToBounds="True">
-            <Image x:Name="BlurredArtworkImage" Stretch="UniformToFill" Margin="-30" Opacity="0.45">
-                <Image.Effect>
-                    <BlurEffect Radius="36" KernelType="Gaussian" />
-                </Image.Effect>
-            </Image>
-            <Border x:Name="BlurredArtworkTintBorder" />
-        </Grid>
+        private void OnPlaybackInfoChangedForTimeline(object? sender, GlobalSystemMediaTransportControlsSessionPlaybackInfo e) =>
+            Dispatcher.InvokeAsync(SyncTimerWithPlayback);
 
-        <Border x:Name="MinimalistGlassLayer" Visibility="Collapsed" IsHitTestVisible="False" />
+        private void SyncTimerWithPlayback()
+        {
+            if (_timelineTimer == null) return;
+            if (_sessionManager.IsPlaying()) _timelineTimer.Start();
+            else { _timelineTimer.Stop(); RefreshTimelineUi(); }
+        }
 
-        <Grid
-            Name="mediaPlayingGrid"
-            Margin="12,0"
-            MouseLeftButtonDown="Window_MouseLeftButtonDown">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="86" />
-                <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
+        private void RefreshTimelineUi()
+        {
+            if (_isSeeking) return;
+            var (pos, dur) = _sessionManager.GetTimeline();
+            TimelineSlider.Maximum = dur.TotalSeconds > 0 ? dur.TotalSeconds : 0;
+            _suppressValueEvent = true;
+            TimelineSlider.Value = pos.TotalSeconds;
+            _suppressValueEvent = false;
+            TimelineSlider.IsEnabled = dur.TotalSeconds > 0;
+            PositionText.Text = pos.ToString(@"m\:ss");
+            DurationText.Text = dur.ToString(@"m\:ss");
 
-            <Border
-                x:Name="ThumbnailContainer"
-                Grid.Column="0"
-                Width="86"
-                Height="86"
-                CornerRadius="8"
-                BorderThickness="0">
-                <Border.Effect>
-                    <DropShadowEffect
-                        x:Name="ThumbnailDropShadow"
-                        BlurRadius="14"
-                        Direction="270"
-                        Opacity="0"
-                        ShadowDepth="2"
-                        Color="Black" />
-                </Border.Effect>
-                <ui:Image
-                    Name="playingMediaThumbnail"
-                    Width="86"
-                    Height="86"
-                    CornerRadius="8"
-                    Visibility="Visible" />
-            </Border>
+            var mode = _sessionManager.GetRepeatModeForUi();
+            RepeatIcon.Text = mode == MediaPlaybackAutoRepeatMode.Track ? "🔂" : "🔁";
+            RepeatButton.Opacity = mode == MediaPlaybackAutoRepeatMode.None ? 0.45 : 1.0;
+            ShuffleButton.Opacity = _sessionManager.GetShuffleForUi() == true ? 1.0 : 0.45;
+        }
 
-            <StackPanel
-                Grid.Column="1"
-                Margin="12,0,0,0"
-                VerticalAlignment="Center">
-                <ui:TextBlock
-                    Name="playingMediaTitle"
-                    Margin="0,0,0,1"
-                    FontSize="17"
-                    FontTypography="BodyStrong"
-                    Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}" />
-                <ui:TextBlock
-                    Name="playingMediaArtist"
-                    Margin="0,0,0,10"
-                    FontTypography="Body"
-                    Foreground="{ui:ThemeResource TextFillColorTertiaryBrush}" />
-                <Grid
-                    Margin="0,4,0,0"
-                    HorizontalAlignment="Stretch"
-                    VerticalAlignment="Center">
-                    <StackPanel
-                        Name="PlaybackButtonsGrid"
-                        HorizontalAlignment="Left"
-                        VerticalAlignment="Center"
-                        Orientation="Horizontal">
-                        <ui:Button Name="PreviousTrackButton" Click="PreviousButton_ClickAsync">
-                            <ui:SymbolIcon
-                                Filled="False"
-                                FontSize="18"
-                                Symbol="Previous16" />
-                        </ui:Button>
-                        <ui:Button
-                            x:Name="PlayPauseButton"
-                            Margin="10,0"
-                            Appearance="Primary"
-                            Click="PlayPauseButton_ClickAsync">
-                            <ui:SymbolIcon
-                                Name="playPauseIcon"
-                                Filled="True"
-                                FontSize="18"
-                                Symbol="Play12" />
-                        </ui:Button>
-                        <ui:Button Name="NextTrackButton" Click="NextButton_ClickAsync">
-                            <ui:SymbolIcon
-                                Filled="False"
-                                FontSize="18"
-                                Symbol="Next16" />
-                        </ui:Button>
-                    </StackPanel>
+        private void TimelineSlider_DragStarted(object sender, DragStartedEventArgs e) => _isSeeking = true;
 
-                    <StackPanel
-                        HorizontalAlignment="Right"
-                        VerticalAlignment="Center"
-                        Orientation="Horizontal">
-                        <ui:Button
-                            Name="LockButton"
-                            Padding="4,4"
-                            Appearance="Transparent"
-                            BorderBrush="Transparent"
-                            Click="LockButton_Click">
-                            <ui:SymbolIcon
-                                Name="LockIcon"
-                                FontSize="17"
-                                Foreground="{ui:ThemeResource TextFillColorTertiaryBrush}"
-                                Symbol="LockOpen16" />
-                        </ui:Button>
-                        <ui:Button
-                            Name="CycleSessionButton"
-                            Padding="4,3.2"
-                            Appearance="Transparent"
-                            BorderBrush="Transparent"
-                            Opacity="0.4"
-                            IsHitTestVisible="False"
-                            Click="CycleSessionButton_Click">
-                            <ui:SymbolIcon
-                                FontSize="18"
-                                Foreground="{ui:ThemeResource TextFillColorTertiaryBrush}"
-                                Symbol="ArrowRight16" />
-                        </ui:Button>
-                    </StackPanel>
-                </Grid>
-            </StackPanel>
-        </Grid>
+        private async void TimelineSlider_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            _isSeeking = false;
+            await _sessionManager.SeekAsync(TimeSpan.FromSeconds(TimelineSlider.Value));
+            RefreshTimelineUi();
+        }
 
-        <Grid
-            Name="noMediaPlayingGrid"
-            Margin="12,0"
-            MouseLeftButtonDown="Window_MouseLeftButtonDown"
-            Visibility="Collapsed">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="1*" />
-                <ColumnDefinition Width="3*" />
-            </Grid.ColumnDefinitions>
+        // Клик по дорожке (не перетаскивание): дебаунс 150 мс и seek
+        private void TimelineSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_isSeeking || _suppressValueEvent) return;
+            _clickSeekTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+            _clickSeekTimer.Stop();
+            _clickSeekTimer.Tick -= ClickSeekTimer_Tick;
+            _clickSeekTimer.Tick += ClickSeekTimer_Tick;
+            _clickSeekTimer.Start();
+        }
 
-            <ui:SymbolIcon
-                Name="noMediaPlayingIcon"
-                Grid.Column="0"
-                Width="82"
-                Height="82"
-                Filled="True"
-                FontSize="65"
-                Symbol="MusicNoteOff224" />
+        private async void ClickSeekTimer_Tick(object? sender, EventArgs e)
+        {
+            _clickSeekTimer?.Stop();
+            if (_isSeeking) return;
+            await _sessionManager.SeekAsync(TimeSpan.FromSeconds(TimelineSlider.Value));
+            RefreshTimelineUi();
+        }
 
-            <StackPanel
-                Name="noMediaPlayingPanel"
-                Grid.Column="1"
-                Margin="10,0,0,10"
-                VerticalAlignment="Center">
-                <ui:TextBlock
-                    Name="noPlayingMediaTitle"
-                    FontSize="22"
-                    FontTypography="Subtitle"
-                    Foreground="{ui:ThemeResource TextFillColorPrimaryBrush}"
-                    Text="It’s a bit quiet in here..." />
-                <ui:TextBlock
-                    Name="noPlayingMediaArtist"
-                    Margin="0,4,0,0"
-                    FontTypography="Body"
-                    Foreground="{ui:ThemeResource TextFillColorTertiaryBrush}"
-                    Text="Time to break the silence" />
-            </StackPanel>
-        </Grid>
-    </Grid>
-</ui:FluentWindow>
+        private async void RepeatButton_Click(object sender, RoutedEventArgs e)
+        {
+            await _sessionManager.CycleRepeatAsync();
+            RefreshTimelineUi();
+        }
+
+        private async void ShuffleButton_Click(object sender, RoutedEventArgs e)
+        {
+            await _sessionManager.ToggleShuffleAsync();
+            RefreshTimelineUi();
+        }
+    }
+}
