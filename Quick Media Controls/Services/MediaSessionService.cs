@@ -434,19 +434,47 @@ namespace Quick_Media_Controls.Services
             try
             {
                 bool ok = await CurrentSession.TryChangePlaybackPositionAsync(position.Ticks);
-                if (!ok) ok = await CurrentSession.TryChangePlaybackPositionAsync((long)position.TotalMilliseconds);
-                if (ok)
+                if (ok && await VerifySeekAppliedAsync(position))
                 {
-                    _timelineBasePosition = position;
-                    _timelineBaseUtc = DateTime.UtcNow;
+                    CommitSeek(position);
+                    return true;
                 }
-                return ok;
+
+                // Нативный seek не применился: для браузерных сессий шлём команду в юзерскрипт.
+                // Никакого миллисекундного fallback — он прыгал в 0 на YouTube.
+                if (IsWebSession())
+                {
+                    LocalPlaybackBridge.EnqueueCommand(
+                        $"seek={position.TotalSeconds.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)}");
+                    CommitSeek(position);
+                    return true;
+                }
+
+                RecordTimeline(CurrentSession.GetTimelineProperties());
+                return false;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Error seeking: {ex.Message}");
                 return false;
             }
+        }
+
+        private async Task<bool> VerifySeekAppliedAsync(TimeSpan expected)
+        {
+            foreach (var delayMs in new[] { 500, 1500 })
+            {
+                await Task.Delay(delayMs);
+                var actual = CurrentSession?.GetTimelineProperties()?.Position ?? TimeSpan.Zero;
+                if (Math.Abs((actual - expected).TotalSeconds) < 3.0) return true;
+            }
+            return false;
+        }
+
+        private void CommitSeek(TimeSpan position)
+        {
+            _timelineBasePosition = position;
+            _timelineBaseUtc = DateTime.UtcNow;
         }
 
         // ======================================================================
