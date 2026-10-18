@@ -16,7 +16,9 @@ namespace Quick_Media_Controls
     public partial class MediaFlyout
     {
         private DispatcherTimer? _timelineTimer;
+        private DispatcherTimer? _clickSeekTimer;
         private bool _isSeeking;
+        private bool _suppressValueEvent;
 
         private void TimelineRoot_Loaded(object sender, RoutedEventArgs e)
         {
@@ -31,6 +33,7 @@ namespace Quick_Media_Controls
         private void TimelineRoot_Unloaded(object sender, RoutedEventArgs e)
         {
             _timelineTimer?.Stop();
+            _clickSeekTimer?.Stop();
             _sessionManager.TimelineChanged -= OnTimelineChanged;
             _sessionManager.PlaybackInfoChanged -= OnPlaybackInfoChangedForTimeline;
         }
@@ -53,7 +56,9 @@ namespace Quick_Media_Controls
             if (_isSeeking) return;
             var (pos, dur) = _sessionManager.GetTimeline();
             TimelineSlider.Maximum = dur.TotalSeconds > 0 ? dur.TotalSeconds : 0;
+            _suppressValueEvent = true;
             TimelineSlider.Value = pos.TotalSeconds;
+            _suppressValueEvent = false;
             TimelineSlider.IsEnabled = dur.TotalSeconds > 0;
             PositionText.Text = pos.ToString(@"m\:ss");
             DurationText.Text = dur.ToString(@"m\:ss");
@@ -69,6 +74,25 @@ namespace Quick_Media_Controls
         private async void TimelineSlider_DragCompleted(object sender, DragCompletedEventArgs e)
         {
             _isSeeking = false;
+            await _sessionManager.SeekAsync(TimeSpan.FromSeconds(TimelineSlider.Value));
+            RefreshTimelineUi();
+        }
+
+        // Клик по дорожке (не перетаскивание): дебаунс 150 мс и seek в точку
+        private void TimelineSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (_isSeeking || _suppressValueEvent) return;
+            _clickSeekTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+            _clickSeekTimer.Stop();
+            _clickSeekTimer.Tick -= ClickSeekTimer_Tick;
+            _clickSeekTimer.Tick += ClickSeekTimer_Tick;
+            _clickSeekTimer.Start();
+        }
+
+        private async void ClickSeekTimer_Tick(object? sender, EventArgs e)
+        {
+            _clickSeekTimer?.Stop();
+            if (_isSeeking) return;
             await _sessionManager.SeekAsync(TimeSpan.FromSeconds(TimelineSlider.Value));
             RefreshTimelineUi();
         }
