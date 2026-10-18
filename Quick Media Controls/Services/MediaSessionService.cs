@@ -41,8 +41,10 @@ namespace Quick_Media_Controls.Services
 
         // Universal repeat emulation state
         private System.Threading.Timer? _repeatTimer;
-        private int _emulatedRepeat; // 0 off, 1 track, 2 list
+        private int _emulatedRepeat; // 0 off, 1 track, 2 list — включается только кнопкой
         private bool _wasPlaying;
+        private DateTime _lastEmulActionUtc = DateTime.MinValue;
+        private const int EmulCooldownMs = 3000;
 
         public bool IsLocked { get; private set; }
 
@@ -433,20 +435,46 @@ namespace Quick_Media_Controls.Services
             if (CurrentSession == null) return false;
             try
             {
+                // Attempt 1: ticks (100ns units) — documented unit
                 bool ok = await CurrentSession.TryChangePlaybackPositionAsync(position.Ticks);
-                if (!ok) ok = await CurrentSession.TryChangePlaybackPositionAsync((long)position.TotalMilliseconds);
-                if (ok)
+                if (ok && await VerifySeekAppliedAsync(position))
                 {
-                    _timelineBasePosition = position;
-                    _timelineBaseUtc = DateTime.UtcNow;
+                    CommitSeek(position);
+                    return true;
                 }
-                return ok;
+
+                // Attempt 2: milliseconds — some players (YouTube) interpret it this way
+                ok = await CurrentSession.TryChangePlaybackPositionAsync((long)position.TotalMilliseconds);
+                if (ok && await VerifySeekAppliedAsync(position))
+                {
+                    CommitSeek(position);
+                    return true;
+                }
+
+                // Neither took effect: resync UI to whatever the player actually reports
+                RecordTimeline(CurrentSession.GetTimelineProperties());
+                return false;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine($"Error seeking: {ex.Message}");
                 return false;
             }
+        }
+
+        private void CommitSeek(TimeSpan position)
+        {
+            _timelineBasePosition = position;
+            _timelineBaseUtc = DateTime.UtcNow;
+            _lastEmulActionUtc = DateTime.UtcNow;
+        }
+
+        private async Task<bool> VerifySeekAppliedAsync(TimeSpan expected)
+        {
+            await Task.Delay(400);
+            var actual = CurrentSession?.GetTimelineProperties()?.Position ?? TimeSpan.Zero;
+            double diff = Math.Abs((actual - expected).TotalSeconds);
+            return diff < 3.0;
         }
 
         // ======================================================================
@@ -513,7 +541,7 @@ namespace Quick_Media_Controls.Services
             if (IsWebSession())
             {
                 LocalPlaybackBridge.EnqueueCommand($"repeat={(int)next}");
-                _emulatedRepeat = 0;
+                _emulatedRepeat = 0; // Для веба никогда не эмулируем локально
                 EnsureRepeatTimer();
                 return;
             }
@@ -551,14 +579,20 @@ namespace Quick_Media_Controls.Services
         private bool IsWebSession()
         {
             var id = CurrentSession?.SourceAppUserModelId ?? string.Empty;
-            return LocalPlaybackBridge.ReportedRepeatMode.HasValue
-                || id.IndexOf("Chrome", StringComparison.OrdinalIgnoreCase) >= 0
+            if (id.IndexOf("Chrome", StringComparison.OrdinalIgnoreCase) >= 0
                 || id.IndexOf("Edge", StringComparison.OrdinalIgnoreCase) >= 0
                 || id.IndexOf("msedge", StringComparison.OrdinalIgnoreCase) >= 0
                 || id.IndexOf("Firefox", StringComparison.OrdinalIgnoreCase) >= 0
                 || id.IndexOf("Opera", StringComparison.OrdinalIgnoreCase) >= 0
                 || id.IndexOf("Brave", StringComparison.OrdinalIgnoreCase) >= 0
-                || id.IndexOf("Yandex", StringComparison.OrdinalIgnoreCase) >= 0;
+                || id.IndexOf("Yandex", StringComparison.OrdinalIgnoreCase) >= 0
+                || id.IndexOf("Vivaldi", StringComparison.OrdinalIgnoreCase) >= 0
+                || id.IndexOf("Chromium", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+            if (LocalPlaybackBridge.ReportedRepeatMode.HasValue) return true;
+            return false;
         }
 
         private void EnsureRepeatTimer()
@@ -579,22 +613,39 @@ namespace Quick_Media_Controls.Services
             try
             {
                 if (_isDisposed || CurrentSession == null || _emulatedRepeat == 0) return;
+
                 var (pos, dur) = GetTimeline();
                 bool playing = IsPlaying();
-                if (dur <= TimeSpan.Zero) { _wasPlaying = playing; return; }
+
+                // Защита: неизвестная или слишком короткая длительность
+                if (dur <= TimeSpan.Zero || dur.TotalSeconds < 5)
+                {
+                    _wasPlaying = playing;
+                    return;
+                }
+
+                // Защита: не дёргаем ничего в течение 3 сек после любого действия
+                if ((DateTime.UtcNow - _lastEmulActionUtc).TotalMilliseconds < EmulCooldownMs)
+                {
+                    _wasPlaying = playing;
+                    return;
+                }
+
                 double left = (dur - pos).TotalSeconds;
 
                 if (_emulatedRepeat == 1)
                 {
-                    if (playing && left >= 0 && left <= 0.7)
+                    if (playing && left >= 0.7 && left <= 2.0)
                     {
+                        _lastEmulActionUtc = DateTime.UtcNow;
                         _ = SeekAsync(TimeSpan.Zero);
                     }
                 }
                 else if (_emulatedRepeat == 2)
                 {
-                    if (_wasPlaying && !playing && left <= 1.5)
+                    if (_wasPlaying && !playing && left <= 1.5 && left >= 0)
                     {
+                        _lastEmulActionUtc = DateTime.UtcNow;
                         _ = Task.Run(async () =>
                         {
                             await SkipNextAsync();

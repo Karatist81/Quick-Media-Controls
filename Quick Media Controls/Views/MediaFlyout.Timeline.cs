@@ -16,9 +16,10 @@ namespace Quick_Media_Controls
     public partial class MediaFlyout
     {
         private DispatcherTimer? _timelineTimer;
-        private DispatcherTimer? _clickSeekTimer;
         private bool _isSeeking;
         private bool _suppressValueEvent;
+        private DateTime _lastUserSeekUtc = DateTime.MinValue;
+        private const int UserSeekCooldownMs = 800;
 
         private void TimelineRoot_Loaded(object sender, RoutedEventArgs e)
         {
@@ -33,7 +34,6 @@ namespace Quick_Media_Controls
         private void TimelineRoot_Unloaded(object sender, RoutedEventArgs e)
         {
             _timelineTimer?.Stop();
-            _clickSeekTimer?.Stop();
             _sessionManager.TimelineChanged -= OnTimelineChanged;
             _sessionManager.PlaybackInfoChanged -= OnPlaybackInfoChangedForTimeline;
         }
@@ -69,32 +69,30 @@ namespace Quick_Media_Controls
             ShuffleButton.Opacity = _sessionManager.GetShuffleForUi() == true ? 1.0 : 0.45;
         }
 
-        private void TimelineSlider_DragStarted(object sender, DragStartedEventArgs e) => _isSeeking = true;
-
-        private async void TimelineSlider_DragCompleted(object sender, DragCompletedEventArgs e)
+        // Единая точка seek для drag и клика, с анти-спамом
+        private async void DoUserSeek(double seconds)
         {
-            _isSeeking = false;
-            await _sessionManager.SeekAsync(TimeSpan.FromSeconds(TimelineSlider.Value));
+            var now = DateTime.UtcNow;
+            if ((now - _lastUserSeekUtc).TotalMilliseconds < UserSeekCooldownMs) return;
+            _lastUserSeekUtc = now;
+            await _sessionManager.SeekAsync(TimeSpan.FromSeconds(seconds));
             RefreshTimelineUi();
         }
 
-        // Клик по дорожке (не перетаскивание): дебаунс 150 мс и seek в точку
+        private void TimelineSlider_DragStarted(object sender, DragStartedEventArgs e) => _isSeeking = true;
+
+        private void TimelineSlider_DragCompleted(object sender, DragCompletedEventArgs e)
+        {
+            _isSeeking = false;
+            DoUserSeek(TimelineSlider.Value);
+        }
+
+        // Клик по дорожке (IsMoveToPointEnabled двигает thumb -> приходит DragCompleted,
+        // но если WPF-UI съест событие, ловим через ValueChanged без дебаунса)
         private void TimelineSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
         {
             if (_isSeeking || _suppressValueEvent) return;
-            _clickSeekTimer ??= new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
-            _clickSeekTimer.Stop();
-            _clickSeekTimer.Tick -= ClickSeekTimer_Tick;
-            _clickSeekTimer.Tick += ClickSeekTimer_Tick;
-            _clickSeekTimer.Start();
-        }
-
-        private async void ClickSeekTimer_Tick(object? sender, EventArgs e)
-        {
-            _clickSeekTimer?.Stop();
-            if (_isSeeking) return;
-            await _sessionManager.SeekAsync(TimeSpan.FromSeconds(TimelineSlider.Value));
-            RefreshTimelineUi();
+            DoUserSeek(e.NewValue);
         }
 
         private async void RepeatButton_Click(object sender, RoutedEventArgs e)
